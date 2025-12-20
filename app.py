@@ -1,25 +1,55 @@
 from flask import Flask, request, jsonify
 from flask_mail import Mail, Message
 from flask_cors import CORS, cross_origin
+from dotenv import load_dotenv
 import os
 from datetime import datetime
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)  # This enables CORS for all routes
 
-# Mail configuration for Gmail
-app.config['MAIL_SERVER'] = 'smtp.gmail.com'
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USE_SSL'] = False
-app.config['MAIL_USERNAME'] = 'tembo4401@gmail.com'
-app.config['MAIL_PASSWORD'] = 'axyc zqwt svai xgnq'  # Your app password
-app.config['MAIL_DEFAULT_SENDER'] = 'tembo4401@gmail.com'
+# Flask configuration from environment variables
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Database configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///./safari_bookings.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Mail configuration from environment variables
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True') == 'True'
+app.config['MAIL_USE_SSL'] = os.getenv('MAIL_USE_SSL', 'False') == 'True'
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
+
+# Initialize extensions
+from extensions import db
+db.init_app(app)
 
 mail = Mail(app)
 
+# Register Blueprints
+from views.auth import auth_bp
+from views.users import users_bp
+from views.stories import stories_bp
+from views.reviews import reviews_bp
+from views.admin import admin_bp
+from views.prices import prices_bp
+
+app.register_blueprint(auth_bp, url_prefix='/api/auth')
+app.register_blueprint(users_bp, url_prefix='/api/users')
+app.register_blueprint(stories_bp, url_prefix='/api/stories')
+app.register_blueprint(reviews_bp, url_prefix='/api/reviews')
+app.register_blueprint(admin_bp, url_prefix='/api/admin')
+app.register_blueprint(prices_bp, url_prefix='/api/prices')
+
 @app.route('/api/send-booking', methods=['POST', 'OPTIONS'])
-@cross_origin()  # Now this will work
+@cross_origin()
 def send_booking():
     try:
         if request.method == 'OPTIONS':
@@ -39,8 +69,8 @@ def send_booking():
         # Email to you
         msg_to_you = Message(
             subject=f"NEW SAFARI BOOKING: {data['park']}",
-            sender='tembo4401@gmail.com',
-            recipients=['tembo4401@gmail.com'],
+            sender=os.getenv('MAIL_DEFAULT_SENDER'),
+            recipients=[os.getenv('MAIL_USERNAME')],
             body=f"""
             NEW SAFARI BOOKING REQUEST
             ============================
@@ -107,10 +137,10 @@ def send_booking():
         Joztembo Tours Team
         """
         
-        if data['email'] != 'tembo4401@gmail.com':
+        if data['email'] != os.getenv('MAIL_USERNAME'):
             msg_to_customer = Message(
                 subject=f"Booking Confirmation: {data['park']} Safari",
-                sender='tembo4401@gmail.com',
+                sender=os.getenv('MAIL_DEFAULT_SENDER'),
                 recipients=[data['email']],
                 body=confirmation_body
             )
@@ -130,8 +160,42 @@ def send_booking():
 def health_check():
     return jsonify({'status': 'healthy', 'service': 'Safari Booking API'}), 200
 
+@app.route('/')
+def index():
+    return jsonify({
+        'message': 'Safari Booking API',
+        'version': '1.0',
+        'endpoints': {
+            'health': '/api/health',
+            'auth': '/api/auth/*',
+            'users': '/api/users/*',
+            'stories': '/api/stories/*',
+            'reviews': '/api/reviews/*',
+            'admin': '/api/admin/*',
+            'prices': '/api/prices/*',
+            'booking': '/api/send-booking'
+        }
+    })
+
+# Create database tables
+with app.app_context():
+    db.create_all()
+
 if __name__ == '__main__':
     print("🚀 Safari Booking Backend Starting...")
-    print("📡 Server running at http://localhost:5000")
-    print("🔗 Health Check: http://localhost:5000/api/health")
-    app.run(debug=True, port=5000, host='0.0.0.0')
+    print(f"📡 Server running at http://{os.getenv('HOST', '0.0.0.0')}:{os.getenv('PORT', 5000)}")
+    print(f"🔗 Health Check: http://localhost:{os.getenv('PORT', 5000)}/api/health")
+    print("\n📁 Registered Routes:")
+    print("   • /api/auth/*      - Authentication routes")
+    print("   • /api/users/*     - User management routes")
+    print("   • /api/stories/*   - Stories routes")
+    print("   • /api/reviews/*   - Reviews routes")
+    print("   • /api/admin/*     - Admin routes")
+    print("   • /api/prices/*    - Pricing routes")
+    print("   • /api/send-booking - Booking email service")
+    
+    app.run(
+        debug=os.getenv('DEBUG', 'False') == 'True',
+        port=int(os.getenv('PORT', 5000)),
+        host=os.getenv('HOST', '0.0.0.0')
+    )
