@@ -1,10 +1,13 @@
-# app.py - COMPLETE WORKING VERSION WITH ALL ROUTES (INCLUDING CONTACT FORM)
-from flask import Flask, request, jsonify
+# app.py - COMPLETE WORKING VERSION WITH ALL ROUTES (INCLUDING USER CRUD SYSTEM)
+from flask import Flask, request, jsonify, g
 from flask_mail import Mail, Message
 from flask_cors import CORS
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
+from functools import wraps
 import os
 import logging
+import re
+import jwt
 from logging.handlers import RotatingFileHandler
 
 # Import config and extensions
@@ -15,7 +18,8 @@ from extensions import db, migrate
 from models import (
     User, Comment, Lodge, LodgePrice, PriceHistory, Story, Review, 
     AdminActionLog, SafariPackage, PackageDay, PackageItinerary, 
-    ItineraryAccommodation, PackagePrice, SafariReview, SafariComment, Park
+    ItineraryAccommodation, PackagePrice, SafariReview, SafariComment, Park,
+    CustomerReview, ReviewReply
 )
 
 def create_app(config_class=None):
@@ -33,6 +37,12 @@ def create_app(config_class=None):
             app.config.from_object(TestingConfig)
         else:
             app.config.from_object(DevelopmentConfig)
+    
+    # Ensure SECRET_KEY is set for JWT
+    app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', app.config.get('SECRET_KEY', 'your-secret-key-change-in-production'))
+    
+    # JWT Configuration
+    app.config['JWT_EXPIRATION_HOURS'] = 168  # 7 days
     
     # Override with environment variables if they exist
     app.config['MAIL_SERVER'] = os.environ.get('MAIL_SERVER', app.config.get('MAIL_SERVER', 'smtp.gmail.com'))
@@ -64,11 +74,6 @@ def create_app(config_class=None):
     # Register routes
     register_routes(app, mail)
     
-    # Create tables
-    with app.app_context():
-        db.create_all()
-        print("✅ Database tables created/verified")
-    
     return app
 
 def setup_logging(app):
@@ -90,6 +95,61 @@ def setup_logging(app):
         
         app.logger.setLevel(logging.INFO)
         app.logger.info('Safari Booking System startup')
+
+# ============ AUTH DECORATORS ============
+
+def login_required(f):
+    """Decorator to require authentication"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if not token:
+            return jsonify({'success': False, 'error': 'Authentication required'}), 401
+        
+        user = User.verify_auth_token(token)
+        if not user:
+            return jsonify({'success': False, 'error': 'Invalid or expired token'}), 401
+        
+        # Check if user is active
+        if not user.is_active:
+            return jsonify({'success': False, 'error': 'Account has been deactivated'}), 403
+        
+        g.current_user = user
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    """Decorator to require admin access"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if not token:
+            return jsonify({'success': False, 'error': 'Authentication required'}), 401
+        
+        user = User.verify_auth_token(token)
+        if not user or not user.is_admin:
+            return jsonify({'success': False, 'error': 'Admin access required'}), 403
+        
+        if not user.is_active:
+            return jsonify({'success': False, 'error': 'Account has been deactivated'}), 403
+        
+        g.current_user = user
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ✅ NEW: Optional auth decorator
+def optional_auth(f):
+    """Decorator for optional authentication - sets g.current_user if token is valid"""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        g.current_user = None
+        if token:
+            user = User.verify_auth_token(token)
+            if user and user.is_active:
+                g.current_user = user
+        return f(*args, **kwargs)
+    return decorated_function
 
 def register_routes(app, mail):
     """Register all routes"""
@@ -573,6 +633,740 @@ def register_routes(app, mail):
         except Exception as e:
             app.logger.error(f"❌ Failed to send contact confirmation: {str(e)}")
     
+    # ============ AUTH ROUTES ============
+    
+    @app.route("/api/auth/register", methods=["POST"])
+    def register():
+        """Register a new user"""
+        try:
+            data = request.get_json()
+            
+            # Validate required fields
+            if not data.get('name') or not data.get('email') or not data.get('password'):
+                return jsonify({'success': False, 'error': 'Name, email, and password are required'}), 400
+            
+            # Validate email format
+            email_pattern = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+            if not email_pattern.match(data['email']):
+                return jsonify({'success': False, 'error': 'Invalid email format'}), 400
+            
+            # Validate password length
+            if len(data['password']) < 6:
+                return jsonify({'success': False, 'error': 'Password must be at least 6 characters'}), 400
+            
+            email = data['email'].lower().strip()
+            
+            # Check if email already exists
+            if User.query.filter_by(email=email).first():
+                return jsonify({'success': False, 'error': 'Email already registered'}), 400
+            
+            # Generate unique username from email
+            base_username = email.split('@')[0]
+            username = base_username
+            counter = 1
+            while User.query.filter_by(username=username).first():
+                username = f"{base_username}{counter}"
+                counter += 1
+            
+            user = User(
+                name=data['name'].strip(),
+                email=email,
+                username=username,
+                phone=data.get('phone', '').strip()
+            )
+            user.set_password(data['password'])
+            
+            db.session.add(user)
+            db.session.commit()
+            
+            token = user.generate_auth_token()
+            
+            app.logger.info(f"New user registered: {user.email} (username: {user.username})")
+            
+            return jsonify({
+                'success': True,
+                'token': token,
+                'user': user.to_dict()
+            }), 201
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Registration error: {str(e)}")
+            return jsonify({'success': False, 'error': 'Registration failed. Please try again.'}), 500
+    
+    @app.route("/api/auth/login", methods=["POST"])
+    def login():
+        """Login user"""
+        try:
+            data = request.get_json()
+            
+            if not data.get('email') or not data.get('password'):
+                return jsonify({'success': False, 'error': 'Email and password are required'}), 400
+            
+            login_id = data['email'].lower().strip()
+            
+            # Try to find user by email OR username
+            user = User.query.filter(
+                db.or_(User.email == login_id, User.username == login_id)
+            ).first()
+            
+            if not user:
+                return jsonify({'success': False, 'error': 'Invalid email/username or password'}), 401
+            
+            if not user.is_active:
+                return jsonify({'success': False, 'error': 'Account has been deactivated. Please contact support.'}), 403
+            
+            if not user.check_password(data['password']):
+                return jsonify({'success': False, 'error': 'Invalid email/username or password'}), 401
+            
+            token = user.generate_auth_token()
+            
+            app.logger.info(f"User logged in: {user.email}")
+            
+            return jsonify({
+                'success': True,
+                'token': token,
+                'user': user.to_dict()
+            }), 200
+            
+        except Exception as e:
+            app.logger.error(f"Login error: {str(e)}")
+            return jsonify({'success': False, 'error': 'Login failed. Please try again.'}), 500
+    
+    @app.route("/api/auth/me", methods=["GET"])
+    @login_required
+    def get_current_user():
+        """Get current user info"""
+        return jsonify({
+            'success': True,
+            'user': g.current_user.to_dict()
+        }), 200
+    
+    # ============ USER CRUD ROUTES ============
+    
+    @app.route("/api/users/profile", methods=["GET"])
+    @login_required
+    def get_profile():
+        """Get current user's profile"""
+        try:
+            return jsonify({
+                'success': True,
+                'user': g.current_user.to_dict()
+            }), 200
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/users/profile", methods=["PUT"])
+    @login_required
+    def update_profile():
+        """Update current user's profile"""
+        try:
+            data = request.get_json()
+            user = g.current_user
+            
+            changes = []
+            
+            if 'name' in data and data['name'].strip() != user.name:
+                changes.append(f"name updated")
+                user.name = data['name'].strip()
+            
+            if 'phone' in data:
+                new_phone = data['phone'].strip()
+                if new_phone != user.phone:
+                    changes.append(f"phone updated")
+                    user.phone = new_phone
+            
+            if 'email' in data:
+                new_email = data['email'].lower().strip()
+                if new_email != user.email:
+                    existing = User.query.filter_by(email=new_email).first()
+                    if existing and existing.id != user.id:
+                        return jsonify({'success': False, 'error': 'Email already in use by another account'}), 400
+                    changes.append(f"email updated")
+                    user.email = new_email
+            
+            if changes:
+                user.updated_at = datetime.now(UTC)
+                db.session.commit()
+                app.logger.info(f"Profile updated for user {user.id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Profile updated successfully',
+                'user': user.to_dict()
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Profile update error: {str(e)}")
+            return jsonify({'success': False, 'error': 'Failed to update profile'}), 500
+    
+    @app.route("/api/users/change-password", methods=["PUT"])
+    @login_required
+    def change_password():
+        """Change current user's password"""
+        try:
+            data = request.get_json()
+            user = g.current_user
+            
+            if not data.get('current_password'):
+                return jsonify({'success': False, 'error': 'Current password is required'}), 400
+            
+            if not user.check_password(data['current_password']):
+                return jsonify({'success': False, 'error': 'Current password is incorrect'}), 400
+            
+            new_password = data.get('new_password', '')
+            if not new_password or len(new_password) < 6:
+                return jsonify({'success': False, 'error': 'New password must be at least 6 characters'}), 400
+            
+            user.set_password(new_password)
+            user.updated_at = datetime.now(UTC)
+            db.session.commit()
+            
+            app.logger.info(f"Password changed for user {user.id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Password changed successfully'
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Password change error: {str(e)}")
+            return jsonify({'success': False, 'error': 'Failed to change password'}), 500
+    
+    @app.route("/api/users/account", methods=["DELETE"])
+    @login_required
+    def delete_account():
+        """Delete current user's account"""
+        try:
+            data = request.get_json()
+            user = g.current_user
+            
+            if not data.get('password'):
+                return jsonify({'success': False, 'error': 'Password is required to delete account'}), 400
+            
+            if not user.check_password(data['password']):
+                return jsonify({'success': False, 'error': 'Incorrect password'}), 400
+            
+            user.is_active = False
+            user.updated_at = datetime.now(UTC)
+            db.session.commit()
+            
+            app.logger.info(f"Account deleted for user {user.id} ({user.email})")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Account deleted successfully'
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Account deletion error: {str(e)}")
+            return jsonify({'success': False, 'error': 'Failed to delete account'}), 500
+    
+    # ============ ADMIN USER MANAGEMENT ROUTES ============
+    
+    @app.route("/api/admin/users", methods=["GET"])
+    @admin_required
+    def get_all_users():
+        """Get all users (admin only)"""
+        try:
+            page = request.args.get('page', 1, type=int)
+            per_page = request.args.get('per_page', 20, type=int)
+            search = request.args.get('search', '', type=str)
+            
+            query = User.query
+            
+            if search:
+                search_term = f"%{search}%"
+                query = query.filter(
+                    db.or_(
+                        User.name.ilike(search_term),
+                        User.email.ilike(search_term),
+                        User.username.ilike(search_term),
+                        User.phone.ilike(search_term)
+                    )
+                )
+            
+            query = query.order_by(User.created_at.desc())
+            pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+            users = pagination.items
+            
+            return jsonify({
+                'success': True,
+                'data': [user.to_dict() for user in users],
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                }
+            }), 200
+            
+        except Exception as e:
+            app.logger.error(f"Error fetching users: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/admin/users/<int:user_id>", methods=["GET"])
+    @admin_required
+    def get_user(user_id):
+        """Get a specific user (admin only)"""
+        try:
+            user = User.query.get(user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            return jsonify({
+                'success': True,
+                'data': user.to_dict()
+            }), 200
+            
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/admin/users/<int:user_id>", methods=["PUT"])
+    @admin_required
+    def admin_update_user(user_id):
+        """Update any user (admin only)"""
+        try:
+            user = User.query.get(user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            data = request.get_json()
+            
+            if 'name' in data and data['name'].strip():
+                user.name = data['name'].strip()
+            
+            if 'email' in data and data['email'].strip():
+                new_email = data['email'].lower().strip()
+                if new_email != user.email:
+                    existing = User.query.filter_by(email=new_email).first()
+                    if existing and existing.id != user.id:
+                        return jsonify({'success': False, 'error': 'Email already in use'}), 400
+                    user.email = new_email
+            
+            if 'phone' in data:
+                user.phone = data['phone'].strip()
+            
+            if 'is_admin' in data:
+                user.is_admin = data['is_admin']
+            
+            if 'is_deputy' in data:
+                user.is_deputy = data['is_deputy']
+            
+            if 'is_active' in data:
+                user.is_active = data['is_active']
+            
+            user.updated_at = datetime.now(UTC)
+            db.session.commit()
+            
+            app.logger.info(f"Admin {g.current_user.id} updated user {user_id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'User updated successfully',
+                'data': user.to_dict()
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Admin update error: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/admin/users/<int:user_id>", methods=["DELETE"])
+    @admin_required
+    def admin_delete_user(user_id):
+        """Delete/deactivate any user (admin only)"""
+        try:
+            user = User.query.get(user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            if user.id == g.current_user.id:
+                return jsonify({'success': False, 'error': 'Cannot delete your own account'}), 400
+            
+            user.is_active = False
+            user.updated_at = datetime.now(UTC)
+            db.session.commit()
+            
+            app.logger.info(f"Admin {g.current_user.id} deactivated user {user_id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'User deactivated successfully'
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Admin delete error: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/admin/users/<int:user_id>/reactivate", methods=["POST"])
+    @admin_required
+    def admin_reactivate_user(user_id):
+        """Reactivate a deactivated user (admin only)"""
+        try:
+            user = User.query.get(user_id)
+            if not user:
+                return jsonify({'success': False, 'error': 'User not found'}), 404
+            
+            if user.is_active:
+                return jsonify({'success': False, 'error': 'User is already active'}), 400
+            
+            user.is_active = True
+            user.updated_at = datetime.now(UTC)
+            db.session.commit()
+            
+            app.logger.info(f"Admin {g.current_user.id} reactivated user {user_id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'User reactivated successfully',
+                'data': user.to_dict()
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Reactivate error: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    # ============ REVIEW ROUTES ============
+    
+    @app.route("/api/reviews", methods=["GET"])
+    def get_reviews():
+        """Get all active reviews with optional filtering"""
+        try:
+            page = request.args.get('page', 1, type=int)
+            per_page = request.args.get('per_page', 10, type=int)
+            sort_by = request.args.get('sort_by', 'created_at')
+            order = request.args.get('order', 'desc')
+            
+            query = CustomerReview.query.filter_by(is_active=True)
+            
+            if sort_by == 'rating':
+                query = query.order_by(CustomerReview.rating.desc() if order == 'desc' else CustomerReview.rating.asc())
+            else:
+                query = query.order_by(CustomerReview.created_at.desc() if order == 'desc' else CustomerReview.created_at.asc())
+            
+            pagination = query.paginate(page=page, per_page=per_page, error_out=False)
+            reviews = pagination.items
+            
+            avg_rating = db.session.query(db.func.avg(CustomerReview.rating))\
+                .filter(CustomerReview.is_active == True).scalar()
+            
+            return jsonify({
+                'success': True,
+                'data': [review.to_dict() for review in reviews],
+                'pagination': {
+                    'page': page,
+                    'per_page': per_page,
+                    'total': pagination.total,
+                    'pages': pagination.pages,
+                    'has_next': pagination.has_next,
+                    'has_prev': pagination.has_prev
+                },
+                'stats': {
+                    'total_reviews': pagination.total,
+                    'average_rating': round(float(avg_rating), 1) if avg_rating else 0
+                }
+            }), 200
+            
+        except Exception as e:
+            app.logger.error(f"Error fetching reviews: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    # ✅ UPDATED: Anyone can post a review (auth optional, supports reviewer_name)
+    @app.route("/api/reviews", methods=["POST"])
+    @optional_auth
+    def create_review():
+        """Create a new review - anyone can post, auth is optional"""
+        try:
+            data = request.get_json()
+            
+            rating = data.get('rating', 0)
+            if not 1 <= rating <= 5:
+                return jsonify({'success': False, 'error': 'Rating must be between 1 and 5'}), 400
+            
+            if not data.get('title') or not data.get('content'):
+                return jsonify({'success': False, 'error': 'Title and content are required'}), 400
+            
+            # ✅ Determine user_id and reviewer_name
+            user_id = None
+            reviewer_name = None
+            
+            if g.current_user:
+                user_id = g.current_user.id
+            else:
+                reviewer_name = data.get('reviewer_name', '').strip()
+                if not reviewer_name:
+                    reviewer_name = 'Anonymous'
+            
+            # Parse visit_date if provided
+            visit_date = None
+            if data.get('visit_date'):
+                try:
+                    visit_date = datetime.strptime(data['visit_date'], '%Y-%m-%d').date()
+                except ValueError:
+                    return jsonify({'success': False, 'error': 'Invalid visit date format. Use YYYY-MM-DD'}), 400
+            
+            review = CustomerReview(
+                user_id=user_id,
+                reviewer_name=reviewer_name,
+                rating=rating,
+                title=data['title'].strip(),
+                content=data['content'].strip(),
+                visit_date=visit_date,
+                package_used=data.get('package_used', '').strip()
+            )
+            
+            db.session.add(review)
+            db.session.commit()
+            
+            display_name = g.current_user.name if g.current_user else reviewer_name
+            app.logger.info(f"Review created by {display_name}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Review submitted successfully',
+                'data': review.to_dict()
+            }), 201
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Error creating review: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+
+    # ✅ UPDATED: Signed-in users can edit their own, admins can edit any
+    @app.route("/api/reviews/<int:review_id>", methods=["PUT"])
+    @login_required
+    def update_review(review_id):
+        """Update a review - owner or admin only"""
+        try:
+            review = CustomerReview.query.get(review_id)
+            
+            if not review or not review.is_active:
+                return jsonify({'success': False, 'error': 'Review not found'}), 404
+            
+            # ✅ Check permission
+            if not g.current_user.is_admin and review.user_id != g.current_user.id:
+                return jsonify({'success': False, 'error': 'You can only edit your own reviews'}), 403
+            
+            data = request.get_json()
+            
+            if 'rating' in data:
+                if not 1 <= data['rating'] <= 5:
+                    return jsonify({'success': False, 'error': 'Rating must be between 1 and 5'}), 400
+                review.rating = data['rating']
+            
+            if 'title' in data:
+                review.title = data['title'].strip()
+            
+            if 'content' in data:
+                review.content = data['content'].strip()
+            
+            if 'visit_date' in data:
+                if data['visit_date']:
+                    try:
+                        review.visit_date = datetime.strptime(data['visit_date'], '%Y-%m-%d').date()
+                    except ValueError:
+                        return jsonify({'success': False, 'error': 'Invalid visit date format'}), 400
+                else:
+                    review.visit_date = None
+            
+            if 'package_used' in data:
+                review.package_used = data['package_used'].strip()
+            
+            if 'reviewer_name' in data and g.current_user.is_admin:
+                review.reviewer_name = data['reviewer_name'].strip() if data['reviewer_name'] else None
+            
+            review.is_edited = True
+            review.edited_at = datetime.now(UTC)
+            review.updated_at = datetime.now(UTC)
+            
+            db.session.commit()
+            
+            app.logger.info(f"Review {review_id} updated by user {g.current_user.id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Review updated successfully',
+                'data': review.to_dict()
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Error updating review: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    # ✅ UPDATED: Signed-in users can delete their own, admins can delete any
+    @app.route("/api/reviews/<int:review_id>", methods=["DELETE"])
+    @login_required
+    def delete_review(review_id):
+        """Delete a review - owner or admin only"""
+        try:
+            review = CustomerReview.query.get(review_id)
+            
+            if not review:
+                return jsonify({'success': False, 'error': 'Review not found'}), 404
+            
+            # ✅ Check permission
+            if not g.current_user.is_admin and review.user_id != g.current_user.id:
+                return jsonify({'success': False, 'error': 'You can only delete your own reviews'}), 403
+            
+            review.is_active = False
+            review.updated_at = datetime.now(UTC)
+            db.session.commit()
+            
+            app.logger.info(f"Review {review_id} deleted by user {g.current_user.id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Review deleted successfully'
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Error deleting review: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    # ============ REVIEW REPLY ROUTES ============
+    
+    @app.route("/api/reviews/<int:review_id>/replies", methods=["GET"])
+    def get_review_replies(review_id):
+        """Get replies for a review"""
+        try:
+            replies = ReviewReply.query.filter_by(review_id=review_id, is_active=True)\
+                .order_by(ReviewReply.created_at.asc()).all()
+            
+            return jsonify({
+                'success': True,
+                'data': [reply.to_dict() for reply in replies]
+            }), 200
+            
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/reviews/<int:review_id>/replies", methods=["POST"])
+    @admin_required
+    def create_reply(review_id):
+        """Create a reply to a review (admin only)"""
+        try:
+            review = CustomerReview.query.get(review_id)
+            
+            if not review:
+                return jsonify({'success': False, 'error': 'Review not found'}), 404
+            
+            data = request.get_json()
+            
+            if not data.get('content'):
+                return jsonify({'success': False, 'error': 'Reply content is required'}), 400
+            
+            reply = ReviewReply(
+                review_id=review_id,
+                user_id=g.current_user.id,
+                content=data['content']
+            )
+            
+            db.session.add(reply)
+            db.session.commit()
+            
+            app.logger.info(f"Reply created for review {review_id} by admin {g.current_user.id}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Reply added successfully',
+                'data': reply.to_dict()
+            }), 201
+            
+        except Exception as e:
+            db.session.rollback()
+            app.logger.error(f"Error creating reply: {str(e)}")
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/replies/<int:reply_id>", methods=["PUT"])
+    @admin_required
+    def update_reply(reply_id):
+        """Update a reply (admin only)"""
+        try:
+            reply = ReviewReply.query.get(reply_id)
+            
+            if not reply or not reply.is_active:
+                return jsonify({'success': False, 'error': 'Reply not found'}), 404
+            
+            data = request.get_json()
+            
+            if not data.get('content'):
+                return jsonify({'success': False, 'error': 'Content is required'}), 400
+            
+            reply.content = data['content']
+            reply.is_edited = True
+            reply.edited_at = datetime.now(UTC)
+            
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Reply updated successfully',
+                'data': reply.to_dict()
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    @app.route("/api/replies/<int:reply_id>", methods=["DELETE"])
+    @admin_required
+    def delete_reply(reply_id):
+        """Delete a reply (admin only)"""
+        try:
+            reply = ReviewReply.query.get(reply_id)
+            
+            if not reply:
+                return jsonify({'success': False, 'error': 'Reply not found'}), 404
+            
+            reply.is_active = False
+            db.session.commit()
+            
+            return jsonify({
+                'success': True,
+                'message': 'Reply deleted successfully'
+            }), 200
+            
+        except Exception as e:
+            db.session.rollback()
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
+    # ============ REVIEW STATS ============
+    
+    @app.route("/api/reviews/stats", methods=["GET"])
+    def get_review_stats():
+        """Get review statistics"""
+        try:
+            total_reviews = CustomerReview.query.filter_by(is_active=True).count()
+            avg_rating = db.session.query(db.func.avg(CustomerReview.rating))\
+                .filter(CustomerReview.is_active == True).scalar()
+            
+            rating_distribution = {}
+            for i in range(1, 6):
+                count = CustomerReview.query.filter_by(rating=i, is_active=True).count()
+                rating_distribution[str(i)] = count
+            
+            return jsonify({
+                'success': True,
+                'stats': {
+                    'total_reviews': total_reviews,
+                    'average_rating': round(float(avg_rating), 1) if avg_rating else 0,
+                    'rating_distribution': rating_distribution
+                }
+            }), 200
+            
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)}), 500
+    
     # ============ SAFARI PACKAGE CRUD ROUTES ============
     
     @app.route("/api/safari-cards", methods=["POST"])
@@ -805,7 +1599,6 @@ def register_routes(app, mail):
             if not data:
                 return jsonify({"success": False, "error": "No data provided"}), 400
             
-            # Validate required fields
             required_fields = ['fullName', 'email', 'phone', 'park', 'lodge', 'travelers']
             missing_fields = [field for field in required_fields if not data.get(field)]
             
@@ -815,10 +1608,8 @@ def register_routes(app, mail):
                     "error": f"Missing required fields: {', '.join(missing_fields)}"
                 }), 400
             
-            # Send admin notification
             booking_id = send_admin_email(data)
             
-            # Send customer confirmation
             try:
                 send_confirmation_email(data, booking_id)
             except Exception as e:
@@ -851,7 +1642,6 @@ def register_routes(app, mail):
             if not data:
                 return jsonify({"success": False, "error": "No data provided"}), 400
             
-            # Validate required fields
             required_fields = ['fullName', 'email', 'subject', 'message']
             missing_fields = [field for field in required_fields if not data.get(field)]
             
@@ -861,10 +1651,8 @@ def register_routes(app, mail):
                     "error": f"Missing required fields: {', '.join(missing_fields)}"
                 }), 400
             
-            # Generate contact reference ID
             contact_id = f"CONTACT-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
             
-            # Subject to emoji mapping
             subject_emoji_map = {
                 "Safari Booking": "🏕️",
                 "Beach Tour": "🏖️",
@@ -878,10 +1666,8 @@ def register_routes(app, mail):
             
             emoji = subject_emoji_map.get(data.get('subject', 'General Inquiry'), '💬')
             
-            # Send admin notification
             send_contact_admin_email(data, contact_id, emoji)
             
-            # Send customer confirmation
             try:
                 send_contact_confirmation(data, contact_id, emoji)
             except Exception as e:
@@ -980,9 +1766,38 @@ def register_routes(app, mail):
     def index():
         return jsonify({
             "message": "🦁 Joztembo Tours - Safari Booking System API",
-            "version": "3.1",
+            "version": "5.0",
             "documentation": "/api/health",
             "endpoints": {
+                "auth": {
+                    "POST /api/auth/register": "Register new user",
+                    "POST /api/auth/login": "Login user",
+                    "GET /api/auth/me": "Get current user (auth required)"
+                },
+                "user_crud": {
+                    "GET /api/users/profile": "Get current user profile",
+                    "PUT /api/users/profile": "Update profile (name, email, phone)",
+                    "PUT /api/users/change-password": "Change password",
+                    "DELETE /api/users/account": "Delete own account (requires password)"
+                },
+                "admin_users": {
+                    "GET /api/admin/users": "Get all users (admin only, with pagination)",
+                    "GET /api/admin/users/<id>": "Get specific user (admin only)",
+                    "PUT /api/admin/users/<id>": "Update any user (admin only)",
+                    "DELETE /api/admin/users/<id>": "Deactivate user (admin only)",
+                    "POST /api/admin/users/<id>/reactivate": "Reactivate user (admin only)"
+                },
+                "reviews": {
+                    "GET /api/reviews": "Get all reviews (with pagination)",
+                    "POST /api/reviews": "✅ Create review (anyone - auth optional, supports reviewer_name)",
+                    "PUT /api/reviews/<id>": "✅ Update review (owner or admin)",
+                    "DELETE /api/reviews/<id>": "✅ Delete review (owner or admin)",
+                    "GET /api/reviews/stats": "Get review statistics",
+                    "GET /api/reviews/<id>/replies": "Get replies for a review",
+                    "POST /api/reviews/<id>/replies": "🔒 Add reply (admin only)",
+                    "PUT /api/replies/<id>": "🔒 Update reply (admin only)",
+                    "DELETE /api/replies/<id>": "🔒 Delete reply (admin only)"
+                },
                 "booking": {
                     "POST /api/send-booking": "Submit a booking request",
                     "POST /api/send-contact": "Submit a contact form message"
@@ -1011,50 +1826,9 @@ app = create_app()
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("🦁 Joztembo Tours - Safari Booking System")
+    print("🦁 Joztembo Tours - Safari Booking System v5.0")
     print("=" * 60)
-    
-    # Display configuration status
-    print(f"📧 Admin recipient: {app.config.get('MAIL_ADMIN_RECIPIENT', '❌ NOT SET')}")
-    print(f"📧 Sender email: {app.config.get('MAIL_DEFAULT_SENDER', '❌ NOT SET')}")
-    print(f"📧 Username: {app.config.get('MAIL_USERNAME', '❌ NOT SET')}")
-    
-    if app.config.get('MAIL_PASSWORD'):
-        masked_pw = '*' * len(app.config['MAIL_PASSWORD'])
-        print(f"📧 Password: {masked_pw} ✅")
-    else:
-        print("📧 Password: ❌ NOT SET")
-    
-    print(f"📧 Mail server: {app.config.get('MAIL_SERVER', 'Not set')}")
-    print(f"🔧 Debug mode: {app.config.get('DEBUG', False)}")
-    print(f"🌍 Environment: {os.environ.get('FLASK_ENV', 'development')}")
-    
-    db_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
-    if 'sqlite' in db_uri:
-        print(f"💾 Database: SQLite ({db_uri})")
-    elif 'mysql' in db_uri:
-        print(f"💾 Database: MySQL")
-    
-    print("=" * 60)
-    print("\n📋 ALL API Endpoints:")
-    print(f"  📧 POST   /api/send-booking              - Submit booking")
-    print(f"  💬 POST   /api/send-contact              - Submit contact form")
-    print(f"  📦 GET    /api/safari-cards              - Get all packages")
-    print(f"  📦 GET    /api/safari-cards/<id>         - Get package")
-    print(f"  📦 POST   /api/safari-cards              - Create package")
-    print(f"  📦 PUT    /api/safari-cards/<id>         - Update package")
-    print(f"  📦 DELETE /api/safari-cards/<id>         - Delete package")
-    print(f"  🏞️  GET    /api/parks                     - Get parks")
-    print(f"  🏞️  POST   /api/parks                     - Create park")
-    print(f"  📧 GET    /api/test-email                - Test email")
-    print(f"  🏥 GET    /api/health                    - Health check")
-    print("=" * 60)
-    
-    if app.config.get('MAIL_SERVER') == 'smtp.gmail.com':
-        print("\n📌 GMAIL: Use App Password, not regular password!")
-        print("   https://myaccount.google.com/apppasswords")
-    
-    print("\n🚀 Starting server...")
+    print("🚀 Starting server...")
     
     host = os.environ.get('HOST', '0.0.0.0')
     port = int(os.environ.get('PORT', 5000))
