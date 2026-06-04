@@ -35,9 +35,9 @@ class User(db.Model):
     safari_reviews = db.relationship('SafariReview', backref='author', lazy=True)
     safari_comments = db.relationship('SafariComment', backref='author', lazy=True)
     
-    # Customer review relationships
-    customer_reviews = db.relationship('CustomerReview', backref='user', lazy='dynamic')
-    review_replies = db.relationship('ReviewReply', backref='user', lazy='dynamic')
+    # Customer review relationships - FIXED: added foreign_keys
+    customer_reviews = db.relationship('CustomerReview', backref='user', lazy='dynamic', foreign_keys='CustomerReview.user_id')
+    review_replies = db.relationship('ReviewReply', backref='user', lazy='dynamic', foreign_keys='ReviewReply.user_id')
     
     def __init__(self, **kwargs):
         """Initialize user with auto-generated username if not provided"""
@@ -455,6 +455,13 @@ class CustomerReview(db.Model):
     content = db.Column(db.Text, nullable=False)
     visit_date = db.Column(db.Date, nullable=True)
     package_used = db.Column(db.String(200), nullable=True)
+    
+    # ✅ APPROVAL SYSTEM FIELDS
+    status = db.Column(db.String(20), default='approved')  # 'pending', 'approved', 'rejected'
+    admin_notes = db.Column(db.Text, nullable=True)  # Admin notes when approving/rejecting
+    approved_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=True)  # Admin who approved/rejected
+    approved_at = db.Column(db.DateTime, nullable=True)  # When the action was taken
+    
     is_edited = db.Column(db.Boolean, default=False)
     edited_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -464,6 +471,7 @@ class CustomerReview(db.Model):
     # Relationships
     replies = db.relationship('ReviewReply', backref='review', lazy='dynamic', 
                               cascade='all, delete-orphan', order_by='ReviewReply.created_at.asc()')
+    approver = db.relationship('User', foreign_keys=[approved_by])  # Admin who approved/rejected
     
     def to_dict(self, include_user=True):
         """Convert review to dictionary"""
@@ -475,8 +483,11 @@ class CustomerReview(db.Model):
             'content': self.content,
             'visit_date': self.visit_date.isoformat() if self.visit_date else None,
             'package_used': self.package_used,
+            'status': self.status,  # ✅ Include approval status
+            'admin_notes': self.admin_notes,  # ✅ Include admin notes
             'is_edited': self.is_edited,
             'edited_at': self.edited_at.isoformat() if self.edited_at else None,
+            'approved_at': self.approved_at.isoformat() if self.approved_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
             'replies': [reply.to_dict() for reply in self.replies if reply.is_active],
@@ -495,6 +506,15 @@ class CustomerReview(db.Model):
             # ✅ Anonymous review - user is None
             data['user'] = None
         
+        # Include approver info for admin views
+        if self.approver:
+            data['approver'] = {
+                'id': self.approver.id,
+                'name': self.approver.name
+            }
+        else:
+            data['approver'] = None
+        
         return data
     
     def get_display_name(self):
@@ -505,6 +525,44 @@ class CustomerReview(db.Model):
             return self.reviewer_name
         else:
             return "Anonymous"
+    
+    def get_reviewer_email(self):
+        """Get reviewer email for notifications"""
+        if self.user and self.user.email:
+            return self.user.email
+        return None
+    
+    def approve(self, admin_user, notes=''):
+        """Approve the review"""
+        self.status = 'approved'
+        self.approved_by = admin_user.id
+        self.approved_at = datetime.utcnow()
+        if notes:
+            self.admin_notes = notes
+        return self
+    
+    def reject(self, admin_user, notes=''):
+        """Reject the review"""
+        self.status = 'rejected'
+        self.approved_by = admin_user.id
+        self.approved_at = datetime.utcnow()
+        self.admin_notes = notes or 'Review does not meet our guidelines.'
+        return self
+    
+    def is_pending(self):
+        """Check if review is pending approval"""
+        return self.status == 'pending'
+    
+    def is_approved(self):
+        """Check if review is approved"""
+        return self.status == 'approved'
+    
+    def is_rejected(self):
+        """Check if review is rejected"""
+        return self.status == 'rejected'
+    
+    def __repr__(self):
+        return f'<CustomerReview {self.id} - {self.status} - {self.get_display_name()}>'
 
 
 class ReviewReply(db.Model):
@@ -538,3 +596,6 @@ class ReviewReply(db.Model):
                 'is_deputy': self.user.is_deputy
             } if self.user else None
         }
+    
+    def __repr__(self):
+        return f'<ReviewReply {self.id} for Review {self.review_id}>'

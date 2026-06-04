@@ -74,6 +74,14 @@ def create_app(config_class=None):
     # Register routes
     register_routes(app, mail)
     
+    # Create database tables on app startup (for production)
+    with app.app_context():
+        try:
+            db.create_all()
+            app.logger.info("Database tables created/verified successfully")
+        except Exception as e:
+            app.logger.error(f"Database initialization error: {e}")
+    
     return app
 
 def setup_logging(app):
@@ -137,7 +145,6 @@ def admin_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# ✅ NEW: Optional auth decorator
 def optional_auth(f):
     """Decorator for optional authentication - sets g.current_user if token is valid"""
     @wraps(f)
@@ -1079,7 +1086,7 @@ def register_routes(app, mail):
             app.logger.error(f"Error fetching reviews: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
 
-    # ✅ UPDATED: Anyone can post a review (auth optional, supports reviewer_name)
+    # Anyone can post a review (auth optional, supports reviewer_name)
     @app.route("/api/reviews", methods=["POST"])
     @optional_auth
     def create_review():
@@ -1094,7 +1101,6 @@ def register_routes(app, mail):
             if not data.get('title') or not data.get('content'):
                 return jsonify({'success': False, 'error': 'Title and content are required'}), 400
             
-            # ✅ Determine user_id and reviewer_name
             user_id = None
             reviewer_name = None
             
@@ -1105,7 +1111,6 @@ def register_routes(app, mail):
                 if not reviewer_name:
                     reviewer_name = 'Anonymous'
             
-            # Parse visit_date if provided
             visit_date = None
             if data.get('visit_date'):
                 try:
@@ -1140,20 +1145,18 @@ def register_routes(app, mail):
             app.logger.error(f"Error creating review: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
 
-    # ✅ UPDATED: Signed-in users can edit their own, admins can edit any
+    # ✅ UPDATED: ANY signed-in user can edit ANY review (no ownership check)
     @app.route("/api/reviews/<int:review_id>", methods=["PUT"])
     @login_required
     def update_review(review_id):
-        """Update a review - owner or admin only"""
+        """Update a review - any authenticated user can update any review"""
         try:
             review = CustomerReview.query.get(review_id)
             
             if not review or not review.is_active:
                 return jsonify({'success': False, 'error': 'Review not found'}), 404
             
-            # ✅ Check permission
-            if not g.current_user.is_admin and review.user_id != g.current_user.id:
-                return jsonify({'success': False, 'error': 'You can only edit your own reviews'}), 403
+            # ✅ REMOVED ownership check - any authenticated user can edit any review
             
             data = request.get_json()
             
@@ -1202,20 +1205,18 @@ def register_routes(app, mail):
             app.logger.error(f"Error updating review: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
     
-    # ✅ UPDATED: Signed-in users can delete their own, admins can delete any
+    # ✅ UPDATED: ANY signed-in user can delete ANY review (no ownership check)
     @app.route("/api/reviews/<int:review_id>", methods=["DELETE"])
     @login_required
     def delete_review(review_id):
-        """Delete a review - owner or admin only"""
+        """Delete a review - any authenticated user can delete any review"""
         try:
             review = CustomerReview.query.get(review_id)
             
             if not review:
                 return jsonify({'success': False, 'error': 'Review not found'}), 404
             
-            # ✅ Check permission
-            if not g.current_user.is_admin and review.user_id != g.current_user.id:
-                return jsonify({'success': False, 'error': 'You can only delete your own reviews'}), 403
+            # ✅ REMOVED ownership check - any authenticated user can delete any review
             
             review.is_active = False
             review.updated_at = datetime.now(UTC)
@@ -1250,10 +1251,11 @@ def register_routes(app, mail):
         except Exception as e:
             return jsonify({'success': False, 'error': str(e)}), 500
     
+    # Any authenticated user can reply to reviews
     @app.route("/api/reviews/<int:review_id>/replies", methods=["POST"])
-    @admin_required
+    @login_required
     def create_reply(review_id):
-        """Create a reply to a review (admin only)"""
+        """Create a reply to a review (any authenticated user can reply)"""
         try:
             review = CustomerReview.query.get(review_id)
             
@@ -1274,7 +1276,7 @@ def register_routes(app, mail):
             db.session.add(reply)
             db.session.commit()
             
-            app.logger.info(f"Reply created for review {review_id} by admin {g.current_user.id}")
+            app.logger.info(f"Reply created for review {review_id} by user {g.current_user.id}")
             
             return jsonify({
                 'success': True,
@@ -1287,15 +1289,20 @@ def register_routes(app, mail):
             app.logger.error(f"Error creating reply: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
     
+    # Users can edit their own replies, admins can edit any
     @app.route("/api/replies/<int:reply_id>", methods=["PUT"])
-    @admin_required
+    @login_required
     def update_reply(reply_id):
-        """Update a reply (admin only)"""
+        """Update a reply - owner or admin only"""
         try:
             reply = ReviewReply.query.get(reply_id)
             
             if not reply or not reply.is_active:
                 return jsonify({'success': False, 'error': 'Reply not found'}), 404
+            
+            # Check permission: user owns the reply OR is admin
+            if not g.current_user.is_admin and reply.user_id != g.current_user.id:
+                return jsonify({'success': False, 'error': 'You can only edit your own replies'}), 403
             
             data = request.get_json()
             
@@ -1308,6 +1315,8 @@ def register_routes(app, mail):
             
             db.session.commit()
             
+            app.logger.info(f"Reply {reply_id} updated by user {g.current_user.id}")
+            
             return jsonify({
                 'success': True,
                 'message': 'Reply updated successfully',
@@ -1316,20 +1325,28 @@ def register_routes(app, mail):
             
         except Exception as e:
             db.session.rollback()
+            app.logger.error(f"Error updating reply: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
     
+    # Users can delete their own replies, admins can delete any
     @app.route("/api/replies/<int:reply_id>", methods=["DELETE"])
-    @admin_required
+    @login_required
     def delete_reply(reply_id):
-        """Delete a reply (admin only)"""
+        """Delete a reply - owner or admin only"""
         try:
             reply = ReviewReply.query.get(reply_id)
             
             if not reply:
                 return jsonify({'success': False, 'error': 'Reply not found'}), 404
             
+            # Check permission: user owns the reply OR is admin
+            if not g.current_user.is_admin and reply.user_id != g.current_user.id:
+                return jsonify({'success': False, 'error': 'You can only delete your own replies'}), 403
+            
             reply.is_active = False
             db.session.commit()
+            
+            app.logger.info(f"Reply {reply_id} deleted by user {g.current_user.id}")
             
             return jsonify({
                 'success': True,
@@ -1338,6 +1355,7 @@ def register_routes(app, mail):
             
         except Exception as e:
             db.session.rollback()
+            app.logger.error(f"Error deleting reply: {str(e)}")
             return jsonify({'success': False, 'error': str(e)}), 500
     
     # ============ REVIEW STATS ============
@@ -1790,13 +1808,13 @@ def register_routes(app, mail):
                 "reviews": {
                     "GET /api/reviews": "Get all reviews (with pagination)",
                     "POST /api/reviews": "✅ Create review (anyone - auth optional, supports reviewer_name)",
-                    "PUT /api/reviews/<id>": "✅ Update review (owner or admin)",
-                    "DELETE /api/reviews/<id>": "✅ Delete review (owner or admin)",
+                    "PUT /api/reviews/<id>": "✅ UPDATE ANY REVIEW (any authenticated user)",
+                    "DELETE /api/reviews/<id>": "✅ DELETE ANY REVIEW (any authenticated user)",
                     "GET /api/reviews/stats": "Get review statistics",
                     "GET /api/reviews/<id>/replies": "Get replies for a review",
-                    "POST /api/reviews/<id>/replies": "🔒 Add reply (admin only)",
-                    "PUT /api/replies/<id>": "🔒 Update reply (admin only)",
-                    "DELETE /api/replies/<id>": "🔒 Delete reply (admin only)"
+                    "POST /api/reviews/<id>/replies": "✅ Create reply (any authenticated user)",
+                    "PUT /api/replies/<id>": "✅ Update reply (owner or admin)",
+                    "DELETE /api/replies/<id>": "✅ Delete reply (owner or admin)"
                 },
                 "booking": {
                     "POST /api/send-booking": "Submit a booking request",
@@ -1821,17 +1839,13 @@ def register_routes(app, mail):
             }
         }), 200
 
+# ============ APP INITIALIZATION ============
+
 # Create app instance
 app = create_app()
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("🦁 Joztembo Tours - Safari Booking System v5.0")
-    print("=" * 60)
-    print("🚀 Starting server...")
-    
-    host = os.environ.get('HOST', '0.0.0.0')
+    # This only runs when executing directly (not on Render with Gunicorn)
     port = int(os.environ.get('PORT', 5000))
-    debug = app.config.get('DEBUG', False)
-    
-    app.run(host=host, port=port, debug=debug)
+    debug = os.environ.get('FLASK_ENV', 'development') == 'development'
+    app.run(host='0.0.0.0', port=port, debug=debug)

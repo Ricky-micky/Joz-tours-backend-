@@ -8,9 +8,25 @@ class Config:
     """Base configuration"""
     SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
     
-    # Database configuration
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL', 'mysql+pymysql://root:password@localhost/safari_booking')
+    # Database Configuration - Render PostgreSQL (uses environment variables only)
+    # The actual connection string should be in your .env file with ?sslmode=require
+    SQLALCHEMY_DATABASE_URI = os.environ.get(
+        'DATABASE_URL', 
+        'postgresql://localhost:5432/your_database'  # Placeholder only - use .env
+    )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    
+    # Database engine options for PostgreSQL (works for both Render and local)
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        'connect_args': {
+            'sslmode': os.environ.get('DB_SSL_MODE', 'require'),  # Render requires 'require'
+            'connect_timeout': 10,
+        },
+        'pool_size': 10,
+        'max_overflow': 20,
+        'pool_recycle': 3600,
+        'pool_pre_ping': True,
+    }
     
     # Flask-Mail configuration
     MAIL_SERVER = os.environ.get('MAIL_SERVER', 'smtp.gmail.com')
@@ -44,18 +60,43 @@ class Config:
         print("✅ Configuration validated successfully")
         return True
 
+
 class DevelopmentConfig(Config):
     """Development configuration"""
     DEBUG = True
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DEV_DATABASE_URL', 'sqlite:///safari_booking_dev.db')
+    # Use Render PostgreSQL or local database from .env
+    SQLALCHEMY_DATABASE_URI = os.environ.get(
+        'DEV_DATABASE_URL',
+        os.environ.get('DATABASE_URL', 'postgresql://localhost:5432/joztembo_dev')
+    )
+    
+    # More verbose logging in development
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        **Config.SQLALCHEMY_ENGINE_OPTIONS,
+        'echo': False,  # Set to True to see SQL queries
+    }
+
 
 class ProductionConfig(Config):
     """Production configuration"""
     DEBUG = False
-    SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL')
+    # Use Render PostgreSQL from environment variable
+    SQLALCHEMY_DATABASE_URI = os.environ.get(
+        'DATABASE_URL',
+        'postgresql://localhost:5432/your_database'  # Fallback - should be set in Render env vars
+    )
+    
+    # Optimized for production
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        **Config.SQLALCHEMY_ENGINE_OPTIONS,
+        'pool_size': 20,
+        'max_overflow': 40,
+    }
+
 
 class TestingConfig(Config):
     """Testing configuration"""
     TESTING = True
     DEBUG = True
     SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    SQLALCHEMY_ENGINE_OPTIONS = {}
