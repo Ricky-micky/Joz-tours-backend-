@@ -88,3 +88,11 @@ class ProductionConfig(Config):
         'pool_size': 20,
         'max_overflow': 40,
     }
+
+
+class TestingConfig(Config):
+    """Testing configuration - for running tests only"""
+    TESTING = True
+    DEBUG = True
+    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
+    SQLALCHEMY_ENGINE_OPTIONS = {}
