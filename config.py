@@ -8,18 +8,23 @@ class Config:
     """Base configuration"""
     SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
     
-    # Database Configuration - Render PostgreSQL (uses environment variables only)
-    # The actual connection string should be in your .env file with ?sslmode=require
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        'DATABASE_URL', 
-        'postgresql://localhost:5432/your_database'  # Placeholder only - use .env
-    )
+    # Database Configuration - Render PostgreSQL
+    database_url = os.environ.get('DATABASE_URL')
+    
+    if database_url:
+        # Ensure SSL mode is set for Render PostgreSQL
+        if '?sslmode=' not in database_url:
+            database_url += '?sslmode=require'
+        SQLALCHEMY_DATABASE_URI = database_url
+    else:
+        # Fallback for local development only
+        SQLALCHEMY_DATABASE_URI = 'postgresql://localhost:5432/joztembo_dev'
+    
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     
-    # Database engine options for PostgreSQL (works for both Render and local)
+    # Database engine options for PostgreSQL
     SQLALCHEMY_ENGINE_OPTIONS = {
         'connect_args': {
-            'sslmode': os.environ.get('DB_SSL_MODE', 'require'),  # Render requires 'require'
             'connect_timeout': 10,
         },
         'pool_size': 10,
@@ -41,62 +46,45 @@ class Config:
     # App configuration
     DEBUG = False
     TESTING = False
-    
-    @staticmethod
-    def validate_config(config_dict):
-        """Validate required configuration from a config dictionary"""
-        required = ['MAIL_USERNAME', 'MAIL_PASSWORD', 'MAIL_ADMIN_RECIPIENT']
-        missing = []
-        
-        for req in required:
-            if not config_dict.get(req):
-                missing.append(req)
-        
-        if missing:
-            print(f"❌ Configuration Error: Missing required environment variables: {', '.join(missing)}")
-            print("Please check your .env file and ensure all required variables are set.")
-            return False
-        
-        print("✅ Configuration validated successfully")
-        return True
 
 
 class DevelopmentConfig(Config):
-    """Development configuration"""
+    """Development configuration for local testing"""
     DEBUG = True
-    # Use Render PostgreSQL or local database from .env
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        'DEV_DATABASE_URL',
-        os.environ.get('DATABASE_URL', 'postgresql://localhost:5432/joztembo_dev')
-    )
     
-    # More verbose logging in development
+    dev_db_url = os.environ.get('DEV_DATABASE_URL') or os.environ.get('DATABASE_URL')
+    
+    if dev_db_url:
+        if '?sslmode=' not in dev_db_url:
+            dev_db_url += '?sslmode=require'
+        SQLALCHEMY_DATABASE_URI = dev_db_url
+    else:
+        SQLALCHEMY_DATABASE_URI = 'postgresql://localhost:5432/joztembo_dev'
+    
     SQLALCHEMY_ENGINE_OPTIONS = {
         **Config.SQLALCHEMY_ENGINE_OPTIONS,
-        'echo': False,  # Set to True to see SQL queries
+        'echo': True,  # Shows SQL queries in terminal for debugging
     }
 
 
 class ProductionConfig(Config):
-    """Production configuration"""
+    """Production configuration for LIVE WEBSITE on Render"""
     DEBUG = False
-    # Use Render PostgreSQL from environment variable
-    SQLALCHEMY_DATABASE_URI = os.environ.get(
-        'DATABASE_URL',
-        'postgresql://localhost:5432/your_database'  # Fallback - should be set in Render env vars
-    )
     
-    # Optimized for production
+    # Get database URL from environment (MUST be set in Render)
+    production_db_url = os.environ.get('DATABASE_URL')
+    
+    if not production_db_url:
+        raise ValueError("❌ DATABASE_URL environment variable is required in production!")
+    
+    if '?sslmode=' not in production_db_url:
+        production_db_url += '?sslmode=require'
+    
+    SQLALCHEMY_DATABASE_URI = production_db_url
+    
+    # Optimized for production performance
     SQLALCHEMY_ENGINE_OPTIONS = {
         **Config.SQLALCHEMY_ENGINE_OPTIONS,
         'pool_size': 20,
         'max_overflow': 40,
     }
-
-
-class TestingConfig(Config):
-    """Testing configuration"""
-    TESTING = True
-    DEBUG = True
-    SQLALCHEMY_DATABASE_URI = 'sqlite:///:memory:'
-    SQLALCHEMY_ENGINE_OPTIONS = {}
