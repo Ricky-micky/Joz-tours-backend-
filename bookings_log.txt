@@ -1,0 +1,60 @@
+
+============================================================
+Booking ID: JOZ-20260401091640
+Date: 2026-04-01 12:16:40
+Park: Maasai Mara National Reserve
+Lodge: Sweet Acacia Camp
+Days: 3
+Travelers: 2
+Total Price: €359
+Customer: erick tembo
+Email: franciscaogelo@gmail.com
+Phone: 0743545012
+Start Date: 2026-04-24
+Message: wwww
+============================================================
+
+================================================================================
+BOOKING ID: JOZ-20260401101454
+Date: 2026-04-01 13:14:54
+================================================================================
+SAFARI DETAILS:
+  Park: Maasai Mara National Reserve
+  Lodge: Sweet Acacia Camp
+  Duration: 3 days
+  Travelers: 2 pax
+  Total Price: €359.00
+  Start Date: Flexible
+  Safari Route: Lake Nakuru - Maasai mara - Abadeas 
+
+CUSTOMER DETAILS:
+  Name: erick tembo
+  Email: erick.tembo@student.moringaschool.com
+  Phone: 0705844287
+
+MESSAGE:
+  wwww
+================================================================================
+
+================================================================================
+BOOKING ID: JOZ-20260401102340
+Date: 2026-04-01 13:23:40
+================================================================================
+SAFARI DETAILS:
+  Park: Maasai Mara National Reserve
+  Lodge: Sweet Acacia Camp
+  Duration: 3 days
+  Travelers: 2 pax
+  Total Price: €359.00
+  Start Date: 2026-04-11
+  Safari Route: Lake Nakuru - Maasai mara - Abadeas 
+
+CUSTOMER DETAILS:
+  Name: erick tembo
+  Email: erick.tembo@student.moringaschool.com
+  Phone: 0705844787
+
+MESSAGE:
+  cccc
+================================================================================
+mgpg kcxm mcyh dnih
