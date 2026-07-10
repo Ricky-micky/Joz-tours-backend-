@@ -1,20 +1,34 @@
-# config.py
 import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
+def format_database_url(url):
+    """Safely formats the database URL for SQLAlchemy and adds SSL mode if missing."""
+    if not url:
+        return None
+    
+    # SQLAlchemy requires 'postgresql://' instead of 'postgres://'
+    if url.startswith('postgres://'):
+        url = url.replace('postgres://', 'postgresql://', 1)
+        
+    # Safely append sslmode depending on whether query parameters exist
+    if 'sslmode=' not in url:
+        if '?' in url:
+            url += '&sslmode=require'
+        else:
+            url += '?sslmode=require'
+            
+    return url
+
 class Config:
     """Base configuration"""
     SECRET_KEY = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
     
-    # Database Configuration - Render PostgreSQL
-    database_url = os.environ.get('DATABASE_URL')
+    # Database Configuration - Render / Supabase PostgreSQL
+    database_url = format_database_url(os.environ.get('DATABASE_URL'))
     
     if database_url:
-        # Ensure SSL mode is set for Render PostgreSQL
-        if '?sslmode=' not in database_url:
-            database_url += '?sslmode=require'
         SQLALCHEMY_DATABASE_URI = database_url
     else:
         # Fallback for local development only
@@ -52,11 +66,9 @@ class DevelopmentConfig(Config):
     """Development configuration for local testing"""
     DEBUG = True
     
-    dev_db_url = os.environ.get('DEV_DATABASE_URL') or os.environ.get('DATABASE_URL')
+    dev_db_url = format_database_url(os.environ.get('DEV_DATABASE_URL') or os.environ.get('DATABASE_URL'))
     
     if dev_db_url:
-        if '?sslmode=' not in dev_db_url:
-            dev_db_url += '?sslmode=require'
         SQLALCHEMY_DATABASE_URI = dev_db_url
     else:
         SQLALCHEMY_DATABASE_URI = 'postgresql://localhost:5432/joztembo_dev'
@@ -72,13 +84,10 @@ class ProductionConfig(Config):
     DEBUG = False
     
     # Get database URL from environment (MUST be set in Render)
-    production_db_url = os.environ.get('DATABASE_URL')
+    production_db_url = format_database_url(os.environ.get('DATABASE_URL'))
     
     if not production_db_url:
         raise ValueError("❌ DATABASE_URL environment variable is required in production!")
-    
-    if '?sslmode=' not in production_db_url:
-        production_db_url += '?sslmode=require'
     
     SQLALCHEMY_DATABASE_URI = production_db_url
     
